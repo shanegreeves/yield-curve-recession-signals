@@ -1,0 +1,206 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+tre = pd.read_csv("rawdata/combinedtreasury.csv", parse_dates=['date'])
+tre = tre.sort_values("date").set_index('date')
+
+# fix gaps
+tre['gdpfix'] = tre["GDPC1"].interpolate(method='linear',limit_area='inside')
+
+
+# slopes
+tre['indproslope'] = tre['INDPRO'].diff(1)
+tre['gdpslope'] = tre['gdpfix'].diff(3)
+tre['unrateslope'] = tre['UNRATE'].diff(1)
+
+# inflation rate
+tre['inflation_rate_yoy'] = tre['CPIAUCSL'].pct_change(12) * 100
+tre['inflation_slope'] = tre['inflation_rate_yoy'].diff(1)
+
+# contracting or nah
+tre['indpro_contracting_2mo'] = (tre['indproslope'] < 0) & (
+    tre['indproslope'].shift(1) < 0
+)
+
+tre['gdp_contracting_2qtr'] = (tre['gdpslope'] < 0) & (
+    tre['gdpslope'].shift(3) < 0
+)
+
+tre['unrate_contracting_2qtr'] = (tre['unrateslope'] < 0) & (
+    tre['unrateslope'].shift(3) < 0
+)
+
+# is it actually all contracting / recession indicators pt 2
+tre["output_contracting"] = (
+    tre["gdp_contracting_2qtr"] | tre["indpro_contracting_2mo"]
+)
+
+tre["labor_weakening"] = (tre["unrateslope"] > 0) & (
+    tre["unrateslope"].shift(1) > 0
+)
+
+tre["cpi_disinflation"] = (tre["inflation_slope"] < 0) & (
+    tre["inflation_slope"].shift(1) < 0
+)
+
+# final indicator
+tre['is_recession'] = tre['output_contracting'] & tre['labor_weakening']
+print(tre[['is_recession', 'recession']].sum())
+
+# create spreads and inversions
+tre['spread_10y2y'] = tre["T_10Y"] - tre["T_2Y"]
+tre['spread_10y3m'] = tre["T_10Y"] - tre["T_3M"]
+
+tre['inver_10y2y'] = (
+    tre['spread_10y2y'] < 0
+).astype(int)
+
+tre['inver_10y3m'] = (
+    tre['spread_10y3m'] < 0
+).astype(int)
+
+# date limitations
+start_date = '1987-01-01'
+end_date = '2026-1-01'
+plot_tre = tre.loc[start_date:end_date]
+nber = plot_tre["recession"].fillna(0).astype(bool)
+model = plot_tre["is_recession"].fillna(False).astype(bool)
+inv_2y = plot_tre["inver_10y2y"].fillna(0).astype(bool)
+inv_3m = plot_tre["inver_10y3m"].fillna(0).astype(bool)
+
+fig, ax1 = plt.subplots(figsize=(16, 8))
+
+# plotting my spreads
+(line_2y,) = ax1.plot(
+    plot_tre.index,
+    plot_tre["spread_10y2y"],
+    color="#1f77b4",
+    linewidth=2,
+    label="10Y-2Y Treasury Spread",
+)
+(line_3m,) = ax1.plot(
+    plot_tre.index,
+    plot_tre["spread_10y3m"],
+    color="#ff7f0e",
+    linewidth=2,
+    linestyle="-",
+    label="10Y-3M Treasury Spread",
+)
+
+# reference line
+zero_line = ax1.axhline(
+    0,
+    color="#d62728",
+    linestyle="--",
+    linewidth=1.2,
+    label="Inversion Threshold (0.0%)",
+)
+ax1.set_ylabel("Yield Spread (Percentage Points)", color="black", fontsize=12)
+ax1.tick_params(axis="y", labelcolor="black")
+ax1.set_xlabel("Timeline", fontsize=12)
+ax1.set_xlim(plot_tre.index.min(), plot_tre.index.max())
+
+# 3. plotting unrate / baseline
+ax2 = ax1.twinx()
+(line_macro,) = ax2.plot(
+    plot_tre.index,
+    plot_tre["UNRATE"],
+    color="#2ca02c",
+    linewidth=1.5,
+    linestyle=":",
+    alpha=0.8,
+    label="Macro Baseline (Unemployment Rate - UNRATE)",
+)
+ax2.set_ylabel(
+    "Unemployment Rate Scale (%)",
+    color="#2ca02c",
+    fontsize=12,
+    rotation=270,
+    va="bottom",
+)
+ax2.tick_params(axis="y", labelcolor="#2ca02c")
+
+# 4. THE GREY BOXES: Shading regions using your exact 'is_recession' flag
+ax1.fill_between(
+     plot_tre.index,
+     0,
+     1,
+     where=nber,
+     step="mid",
+     color="#d62728",
+     alpha=0.15,
+     transform=ax1.get_xaxis_transform()
+)
+
+ax1.fill_between(
+    plot_tre.index,
+    0,
+    .12,
+    where=model,
+    color="#7f7f7f",
+    alpha=0.25,
+    transform=ax1.get_xaxis_transform(),
+)
+
+ax1.fill_between(
+    plot_tre.index,
+    0.94,
+    1,
+    where=inv_2y,
+    step="mid",
+    color="#1f77b4",
+    alpha=0.8,
+    transform=ax1.get_xaxis_transform())
+
+ax1.fill_between(
+    plot_tre.index,
+    0.88,
+    0.94,
+    where=inv_3m,
+    step="mid",
+    color="#ff7f0e",
+    alpha=0.8,
+    transform=ax1.get_xaxis_transform())
+# chart title
+plt.title(
+    "Historical Yield Curve Spreads vs. Model-Identified Recessionary Horizons (1987 - 2026)",
+    fontsize=14,
+    fontweight="bold",
+    pad=20,
+)
+ax1.grid(True, linestyle=":", alpha=0.5)
+
+# fix yo legend boy
+handles = [
+    line_2y, line_3m,
+    zero_line, line_macro,
+    Patch(facecolor="#d62728", alpha=0.25, label="NBER recession"),
+    Patch(facecolor="#4d4d4d", alpha=0.6,  label="Model recession prediction"),
+    Patch(facecolor="#1f77b4", alpha=0.8,  label="10Y-2Y inverted"),
+    Patch(facecolor="#ff7f0e", alpha=0.8,  label="10Y-3M inverted"),
+]
+labels = [
+    "10Y-2Y spread", "10Y-3M spread",
+    "Zero line (inversion)", "Unemployment rate (right axis)",
+    "NBER recession", "Model recession prediction",
+    "10Y-2Y inverted", "10Y-3M inverted",
+]
+
+ax1.legend(
+    handles, labels,
+    loc="upper center",
+    bbox_to_anchor=(0.5, -0.10),
+    ncol=4,
+    frameon=True,
+    fancybox=True,
+    framealpha=0.95,
+    edgecolor="#cccccc",
+    fontsize=10,
+    columnspacing=2.0,
+    handlelength=2.2,
+)
+
+fig.subplots_adjust(bottom=0.2)
+plt.show()
